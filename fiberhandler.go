@@ -16,29 +16,43 @@ import (
 	"github.com/prongbang/gopkg/typex"
 )
 
-type model[T any] struct {
-	Type T
+type DoFunc func(ctx context.Context) (any, error)
+
+type ApiHandler interface {
+	Do(c *fiber.Ctx, requestPtr any, validateRequest bool, doFunc DoFunc) error
+	DoMultipart(c *fiber.Ctx, requestPtr any, validateRequest bool, allowedTypes []string, doFunc DoFunc) error
 }
 
-type DataInvalidError struct {
-	goerror.Body
+type apiHandler[T any] struct {
+	Response    fibererror.Response
+	Validate    *validator.Validate
+	TokenParser *TokenParser[T]
 }
 
-// Error implements error.
-func (c *DataInvalidError) Error() string {
-	return c.Message
+func (h *apiHandler[T]) getUserRequestInfo(c *fiber.Ctx) *T {
+	return h.getRequestInfo(c, func(c *fiber.Ctx) string {
+		if multipartx.IsMultipartForm(c) {
+			return c.FormValue("token")
+		}
+		return h.getRequestToken(c)
+	})
 }
 
-func NewDataInvalidError() error {
-	return &DataInvalidError{
-		Body: goerror.Body{
-			Code:    "CLE029",
-			Message: "Invalid data provided",
-		},
+func (h *apiHandler[T]) getRequestInfo(c *fiber.Ctx, onRequestToken func(c *fiber.Ctx) string) *T {
+	tequestToken := onRequestToken(c)
+	if core.IsEmpty(tequestToken) {
+		return nil
 	}
+
+	tokenData, err := (*h.TokenParser).ParseToken(tequestToken)
+	if err != nil {
+		slog.Error("Failed to parse token", slog.String("error", err.Error()))
+		return nil
+	}
+	return tokenData
 }
 
-func GetRequestToken(c *fiber.Ctx) string {
+func (h *apiHandler[T]) getRequestToken(c *fiber.Ctx) string {
 	requestToken := core.ExtractToken(core.Authorization(c))
 	if core.IsEmpty(requestToken) {
 		accessToken := core.AccessToken{}
@@ -48,59 +62,8 @@ func GetRequestToken(c *fiber.Ctx) string {
 	return requestToken
 }
 
-func GetRequestInfo(c *fiber.Ctx, onRequestToken func(c *fiber.Ctx) string) *core.UserRequestInfo {
-	userRequestInfo := &core.UserRequestInfo{
-		HasUserRequest: false,
-	}
-	userRequestToken := onRequestToken(c)
-	if core.IsEmpty(userRequestToken) {
-		return userRequestInfo
-	}
-
-	tokenData, err := core.GetTokenData(userRequestToken)
-	if err != nil {
-		return userRequestInfo
-	}
-	if tokenData != nil {
-		userRequestInfo.Id = tokenData.UserID
-		userRequestInfo.Roles = tokenData.Roles
-		userRequestInfo.HasUserRequest = true
-	}
-
-	permissionId := c.Locals("permissionId")
-	if permissionId != nil {
-		userRequestInfo.ApiInfo = &core.ApiInfo{
-			PermissionId: permissionId.(string),
-		}
-	}
-
-	return userRequestInfo
-}
-
-type DoFunc func(ctx context.Context) (any, error)
-
-type ApiHandler interface {
-	GetUserRequestInfo(c *fiber.Ctx) *core.UserRequestInfo
-	Do(c *fiber.Ctx, requestPtr any, validateRequest bool, doFunc DoFunc) error
-	DoMultipart(c *fiber.Ctx, requestPtr any, validateRequest bool, allowedTypes []string, doFunc DoFunc) error
-}
-
-type apiHandler struct {
-	Response fibererror.Response
-	Validate *validator.Validate
-}
-
-func (h *apiHandler) GetUserRequestInfo(c *fiber.Ctx) *core.UserRequestInfo {
-	return GetRequestInfo(c, func(c *fiber.Ctx) string {
-		if multipartx.IsMultipartForm(c) {
-			return c.FormValue("token")
-		}
-		return GetRequestToken(c)
-	})
-}
-
-func (h *apiHandler) DoMultipart(c *fiber.Ctx, requestPtr any, validateRequest bool, allowedTypes []string, doFunc DoFunc) error {
-	if c.Method() == http.MethodGet {
+func (h *apiHandler[T]) DoMultipart(c *fiber.Ctx, requestPtr any, validateRequest bool, allowedTypes []string, doFunc DoFunc) error {
+	if c.Method() == http.MethodGet || c.Method() == http.MethodDelete {
 		return nil
 	}
 
@@ -110,25 +73,29 @@ func (h *apiHandler) DoMultipart(c *fiber.Ctx, requestPtr any, validateRequest b
 
 	// Ensure multipart form is parsed
 	if _, err := c.MultipartForm(); err != nil {
+		slog.Error("Invalid request", slog.String("error", err.Error()))
 		return h.Response.With(c).Response(goerror.NewBadRequest())
 	}
 
 	// Validate type assertion for Multipart Request
 	multipartReq, ok := requestPtr.(multipartx.Request)
 	if !ok {
+		slog.Error("Invalid request", slog.String("error", "the task requires implementing the multipartx.Request"))
 		return h.Response.With(c).Response(goerror.NewBadRequest("Invalid request type"))
 	}
 
 	// Process form fields
 	for fieldName, fieldPtr := range multipartReq.FormFields() {
 		if err := typex.SetField(c.FormValue(fieldName), fieldPtr); err != nil {
+			slog.Error("Invalid request", slog.String("error", err.Error()))
 			return h.Response.With(c).Response(goerror.NewBadRequest(fmt.Sprintf("Invalid value for field '%s': %v", fieldName, err)))
 		}
 	}
 
-	// Process file fields
-	allowedMimeTypes := map[string]bool{}
-	if validateRequest {
+	// Process file fields with optimized allocation
+	var allowedMimeTypes map[string]bool
+	if validateRequest && len(allowedTypes) > 0 {
+		allowedMimeTypes = make(map[string]bool, len(allowedTypes))
 		for _, v := range allowedTypes {
 			allowedMimeTypes[v] = true
 		}
@@ -136,7 +103,7 @@ func (h *apiHandler) DoMultipart(c *fiber.Ctx, requestPtr any, validateRequest b
 
 	for fieldName, filePtr := range multipartReq.FileFields() {
 		if fileHeader, err := c.FormFile(fieldName); err == nil {
-			if validateRequest {
+			if validateRequest && allowedMimeTypes != nil {
 				if multipartx.ValidateMimeType(fileHeader, allowedMimeTypes) == nil {
 					*filePtr = fileHeader
 				}
@@ -149,29 +116,31 @@ func (h *apiHandler) DoMultipart(c *fiber.Ctx, requestPtr any, validateRequest b
 	// Validate request if needed
 	if validateRequest {
 		if err := h.Validate.Struct(requestPtr); err != nil {
+			slog.Error("Invalid request", slog.String("error", err.Error()))
 			return h.Response.With(c).Response(NewDataInvalidError())
 		}
 	}
 
-	requestInfo := &core.RequestInfo{
-		UserRequestInfo: h.GetUserRequestInfo(c),
+	requestInfo := &core.RequestInfo[T]{
+		Claims: h.getUserRequestInfo(c),
 	}
 
-	reqModel, ok := requestPtr.(core.Request)
+	reqModel, ok := requestPtr.(core.Request[T])
 	if ok {
 		reqModel.SetRequestInfo(requestInfo)
 	}
 
 	data, err := doFunc(c.UserContext())
 	if err != nil {
+		slog.Error("Invalid request", slog.String("error", err.Error()))
 		return h.Response.With(c).Response(err)
 	}
 
 	return h.Response.With(c).Response(goerror.NewOK(data))
 }
 
-func (h *apiHandler) Do(c *fiber.Ctx, requestPtr any, validateRequest bool, doFunc DoFunc) error {
-	_, err := h.bodyParserIfRequired(c, requestPtr)
+func (h *apiHandler[T]) Do(c *fiber.Ctx, requestPtr any, validateRequest bool, doFunc DoFunc) error {
+	err := h.requestParserIfNeeded(c, requestPtr)
 	if err != nil {
 		return err
 	}
@@ -179,23 +148,24 @@ func (h *apiHandler) Do(c *fiber.Ctx, requestPtr any, validateRequest bool, doFu
 	if validateRequest {
 		err := h.Validate.Struct(requestPtr)
 		if err != nil {
-			slog.Error("Invalid request", slog.String("err", err.Error()))
+			slog.Error("Invalid request", slog.String("error", err.Error()))
 			return h.Response.With(c).Response(NewDataInvalidError())
 		}
 	}
 
-	requestInfo := &core.RequestInfo{
-		UserRequestInfo: h.GetUserRequestInfo(c),
+	requestInfo := &core.RequestInfo[T]{
+		Claims: h.getUserRequestInfo(c),
 	}
 
-	reqModel, ok := requestPtr.(core.Request)
+	reqModel, ok := requestPtr.(core.Request[T])
 	if ok {
 		reqModel.SetRequestInfo(requestInfo)
 	}
 
 	data, err := doFunc(c.UserContext())
 	if err != nil {
-		return err
+		slog.Error("Invalid request", slog.String("error", err.Error()))
+		return h.Response.With(c).Response(err)
 	}
 
 	streamData, ok := data.(*streamx.Stream)
@@ -206,7 +176,7 @@ func (h *apiHandler) Do(c *fiber.Ctx, requestPtr any, validateRequest bool, doFu
 	return h.Response.With(c).Response(goerror.NewOK(data))
 }
 
-func (h *apiHandler) sendStream(c *fiber.Ctx, streamData *streamx.Stream) error {
+func (h *apiHandler[T]) sendStream(c *fiber.Ctx, streamData *streamx.Stream) error {
 	streamx.AttachmentHeader(c, streamData.ContentType, streamData.Filename)
 	if streamData.Size != nil {
 		return c.SendStream(streamData.Data, *streamData.Size)
@@ -214,26 +184,41 @@ func (h *apiHandler) sendStream(c *fiber.Ctx, streamData *streamx.Stream) error 
 	return c.SendStream(streamData.Data)
 }
 
-func (h *apiHandler) bodyParserIfRequired(c *fiber.Ctx, requestPtr interface{}) (bool, error) {
-	if c.Method() == http.MethodGet {
-		return false, nil
-	}
-
+func (h *apiHandler[T]) requestParserIfNeeded(c *fiber.Ctx, requestPtr interface{}) error {
 	if requestPtr == nil {
-		return false, nil
+		slog.Error("Invalid request", slog.String("error", "the request is null"))
+		return nil
 	}
 
-	err := c.BodyParser(requestPtr)
-	if err != nil {
-		return false, h.Response.With(c).Response(goerror.NewBadRequest())
+	switch c.Method() {
+	case http.MethodGet, http.MethodDelete:
+		err := c.QueryParser(requestPtr)
+		if err != nil {
+			slog.Error("Invalid request", slog.String("error", err.Error()))
+			return h.Response.With(c).Response(goerror.NewBadRequest())
+		}
+	default:
+		err := c.BodyParser(requestPtr)
+		if err != nil {
+			slog.Error("Invalid request", slog.String("error", err.Error()))
+			return h.Response.With(c).Response(goerror.NewBadRequest())
+		}
 	}
 
-	return true, nil
+	return nil
 }
 
-func New(response fibererror.Response, validate *validator.Validate) ApiHandler {
-	return &apiHandler{
-		Response: response,
-		Validate: validate,
+func New[T any](response fibererror.Response, validate *validator.Validate, tokenParser ...TokenParser[T]) ApiHandler {
+	var newTokenParser TokenParser[T]
+	if len(tokenParser) == 0 {
+		newTokenParser = NewJWTParser[T]()
+	} else {
+		newTokenParser = tokenParser[0]
+	}
+
+	return &apiHandler[T]{
+		Response:    response,
+		Validate:    validate,
+		TokenParser: &newTokenParser,
 	}
 }

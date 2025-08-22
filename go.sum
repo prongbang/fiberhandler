@@ -42,8 +42,8 @@ github.com/prongbang/fibererror v1.1.1 h1:XWa25moBs+qosLjZOjqa8lCi/NXWKLyczdmN0I
 github.com/prongbang/fibererror v1.1.1/go.mod h1:lHQizAKvXVRDcXxvvev/+VvOmqKXijUDM/v/yZdZCdI=
 github.com/prongbang/goerror v1.0.1 h1:XZ0uKc3TbUU/POWi9XUGf52jecQFz5Ojj0wgXjTQf68=
 github.com/prongbang/goerror v1.0.1/go.mod h1:NUbYvGod+bGrXqd7KVRSQB/3hBpZBK7OGNKSDmt8GQg=
-github.com/prongbang/gopkg v1.1.1 h1:w23B9hH9tGgGp4C50gegoz+HC91rusLLaw5ykl+4maI=
-github.com/prongbang/gopkg v1.1.1/go.mod h1:6PkdewA3blNeuvi/A/Z9xnuuaxkNS1pLJdfQhMtGuRQ=
+github.com/prongbang/gopkg v1.1.2 h1:RRGtUm2JNHQtRVWpzWcbtfdY7OEOIdQSUI801KtGxHA=
+github.com/prongbang/gopkg v1.1.2/go.mod h1:6PkdewA3blNeuvi/A/Z9xnuuaxkNS1pLJdfQhMtGuRQ=
 github.com/richardlehane/mscfb v1.0.4 h1:WULscsljNPConisD5hR0+OyZjwK46Pfyr6mPu5ZawpM=
 github.com/richardlehane/mscfb v1.0.4/go.mod h1:YzVpcZg9czvAuhk9T+a3avCpcFPMUWm7gK3DypaEsUk=
 github.com/richardlehane/msoleps v1.0.1/go.mod h1:BWev5JBpU9Ko2WAgmZEuiz4/u3ZYTKbjLycmwiWUfWg=
